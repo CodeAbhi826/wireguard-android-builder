@@ -39,7 +39,7 @@ jobs:
           last_go_commit=""
         fi
         
-        # Set outputs and update commit records
+        # Set outputs using new format
         if [ "$tools_commit" != "$last_tools_commit" ] || [ "$go_commit" != "$last_go_commit" ]; then
           echo "tools:${tools_commit}" > last_commits.txt
           echo "go:${go_commit}" >> last_commits.txt
@@ -55,7 +55,6 @@ jobs:
         echo "No source updates - skipping build"
         exit 1
         
-    # Build steps remain the same as before...
     - name: Clone WireGuard sources
       run: |
         git clone --depth 1 https://git.zx2c4.com/wireguard-tools
@@ -80,21 +79,22 @@ jobs:
         chmod +x artifacts/*
         echo "Built on $(date -u)" > artifacts/build-info.txt
         
+        # Create zip file to fix EISDIR error
+        zip -r wireguard-android-arm64.zip artifacts
+        
     - name: Upload binaries
       uses: actions/upload-artifact@v4
       with:
         name: wireguard-android-binaries
-        path: artifacts/
+        path: wireguard-android-arm64.zip
         
     # Create GitHub Release
     - name: Create Release
       id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      uses: softprops/action-gh-release@v1
       with:
         tag_name: build-${{ github.run_id }}
-        release_name: "WireGuard Android Build - $(date +'%Y-%m-%d')"
+        name: "WireGuard Android Build - $(date +'%Y-%m-%d')"
         body: |
           Automatic build of WireGuard tools for Android ARM64
           - Built from latest sources
@@ -102,16 +102,8 @@ jobs:
           - Userspace implementation
         draft: false
         prerelease: false
-        
-    - name: Upload Release Asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./artifacts/
-        asset_name: wireguard-android-arm64.zip
-        asset_content_type: application/zip
+        files: |
+          wireguard-android-arm64.zip
         
     - name: Update build timestamp
       env:
