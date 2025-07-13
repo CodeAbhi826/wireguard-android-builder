@@ -32,6 +32,23 @@ Automated builds of WireGuard tools for rooted Android devices (ARM64). Provides
 - Source code updates (via repository_dispatch)
 - Push to main branch
 
+## 📥 Download Latest Release
+
+Get pre-built binaries from the [Releases Section](https://github.com/CodeAbhi826/wireguard-android-builder/releases)
+
+[![Latest Release](https://img.shields.io/github/v/release/CodeAbhi826/wireguard-android-builder?label=Latest%20Release&style=for-the-badge)](https://github.com/CodeAbhi826/wireguard-android-builder/releases)
+
+## 🔄 Automatic Updates
+- Daily builds at 12:00 UTC
+- Auto-detects WireGuard source updates
+- New releases published automatically
+
+## 🛠️ How It Works
+1. Daily check for WireGuard source updates
+2. If updates found, triggers build workflow
+3. Builds static ARM64 binaries
+4. Creates new GitHub release with binaries
+
 ## Source Projects
 - [wireguard-tools](https://git.zx2c4.com/wireguard-tools)
 - [wireguard-go](https://git.zx2c4.com/wireguard-go)

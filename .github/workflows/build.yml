@@ -1,14 +1,11 @@
 name: WireGuard Android Build Pipeline
 on:
-  # Automatic triggers
   schedule:
     - cron: '0 12 * * *'  # Daily builds at 12:00 UTC
   repository_dispatch:
-    types: [request_build]
+    types: [source_updated]
   push:
     branches: [main]
-  
-  # Manual trigger from GitHub UI
   workflow_dispatch:
 
 jobs:
@@ -17,12 +14,48 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
       
     - name: Setup build environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential git gcc-aarch64-linux-gnu golang-go
+        sudo apt-get install -y build-essential git gcc-aarch64-linux-gnu golang-go jq
         
+    # Check if WireGuard sources have updated
+    - name: Check source updates
+      id: check-sources
+      run: |
+        # Get latest commit from WireGuard sources
+        tools_commit=$(curl -s https://api.github.com/repos/WireGuard/wireguard-tools/commits | jq -r '.[0].sha')
+        go_commit=$(curl -s https://api.github.com/repos/WireGuard/wireguard-go/commits | jq -r '.[0].sha')
+        
+        # Check against last known commits
+        if [ -f "last_commits.txt" ]; then
+          last_tools_commit=$(grep tools last_commits.txt | cut -d':' -f2)
+          last_go_commit=$(grep go last_commits.txt | cut -d':' -f2)
+        else
+          last_tools_commit=""
+          last_go_commit=""
+        fi
+        
+        # Set outputs and update commit records
+        if [ "$tools_commit" != "$last_tools_commit" ] || [ "$go_commit" != "$last_go_commit" ]; then
+          echo "tools:${tools_commit}" > last_commits.txt
+          echo "go:${go_commit}" >> last_commits.txt
+          echo "should_build=true" >> $GITHUB_OUTPUT
+        else
+          echo "should_build=false" >> $GITHUB_OUTPUT
+        fi
+        
+    # Skip build if no updates (except for manual triggers)
+    - name: Skip build if no updates
+      if: ${{ steps.check-sources.outputs.should_build == 'false' && github.event_name != 'workflow_dispatch' }}
+      run: |
+        echo "No source updates - skipping build"
+        exit 1
+        
+    # Build steps remain the same as before...
     - name: Clone WireGuard sources
       run: |
         git clone --depth 1 https://git.zx2c4.com/wireguard-tools
@@ -53,8 +86,34 @@ jobs:
         name: wireguard-android-binaries
         path: artifacts/
         
+    # Create GitHub Release
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: build-${{ github.run_id }}
+        release_name: "WireGuard Android Build - $(date +'%Y-%m-%d')"
+        body: |
+          Automatic build of WireGuard tools for Android ARM64
+          - Built from latest sources
+          - Static binaries (no dependencies)
+          - Userspace implementation
+        draft: false
+        prerelease: false
+        
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./artifacts/
+        asset_name: wireguard-android-arm64.zip
+        asset_content_type: application/zip
+        
     - name: Update build timestamp
-      if: ${{ github.event_name != 'push' }}  # Skip during push events
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |

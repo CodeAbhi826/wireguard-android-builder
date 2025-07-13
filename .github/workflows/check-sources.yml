@@ -1,0 +1,38 @@
+name: Check WireGuard Sources
+on:
+  schedule:
+    - cron: '0 11 * * *'  # Run daily at 11:00 UTC (before build schedule)
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Get current commits
+      run: |
+        # Get latest commits
+        tools_commit=$(curl -s https://api.github.com/repos/WireGuard/wireguard-tools/commits | jq -r '.[0].sha')
+        go_commit=$(curl -s https://api.github.com/repos/WireGuard/wireguard-go/commits | jq -r '.[0].sha')
+        
+        # Check against last known commits
+        if [ -f "last_commits.txt" ]; then
+          last_tools_commit=$(grep tools last_commits.txt | cut -d':' -f2)
+          last_go_commit=$(grep go last_commits.txt | cut -d':' -f2)
+        else
+          last_tools_commit=""
+          last_go_commit=""
+        fi
+        
+        # Trigger build if updates detected
+        if [ "$tools_commit" != "$last_tools_commit" ] || [ "$go_commit" != "$last_go_commit" ]; then
+          echo "New updates detected - triggering build"
+          curl -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.everest-preview+json" \
+            "https://api.github.com/repos/${{ github.repository }}/dispatches" \
+            -d '{"event_type": "source_updated"}'
+        else
+          echo "No updates detected"
+        fi
