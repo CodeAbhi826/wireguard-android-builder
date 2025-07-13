@@ -1,0 +1,63 @@
+name: WireGuard Android Build Pipeline
+on:
+  # Automatic triggers
+  schedule:
+    - cron: '0 12 * * *'  # Daily builds at 12:00 UTC
+  repository_dispatch:
+    types: [request_build]
+  push:
+    branches: [main]
+  
+  # Manual trigger from GitHub UI
+  workflow_dispatch:
+
+jobs:
+  build-binaries:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential git gcc-aarch64-linux-gnu golang-go
+        
+    - name: Clone WireGuard sources
+      run: |
+        git clone --depth 1 https://git.zx2c4.com/wireguard-tools
+        git clone --depth 1 https://git.zx2c4.com/wireguard-go
+        
+    - name: Build wireguard-tools (wg, wg-quick)
+      run: |
+        cd wireguard-tools/src
+        make CC="aarch64-linux-gnu-gcc" LDFLAGS="-static" -j$(nproc)
+        
+    - name: Build wireguard-go
+      run: |
+        cd wireguard-go
+        GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o wireguard-go
+        
+    - name: Prepare artifacts
+      run: |
+        mkdir -p artifacts
+        cp wireguard-tools/src/wg artifacts/
+        cp wireguard-tools/src/wg-quick/linux.bash artifacts/wg-quick
+        cp wireguard-go/wireguard-go artifacts/
+        chmod +x artifacts/*
+        echo "Built on $(date -u)" > artifacts/build-info.txt
+        
+    - name: Upload binaries
+      uses: actions/upload-artifact@v4
+      with:
+        name: wireguard-android-binaries
+        path: artifacts/
+        
+    - name: Update build timestamp
+      run: |
+        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" > last_build.txt
+        git config user.name "GitHub Actions"
+        git config user.email "actions@users.noreply.github.com"
+        git add last_build.txt
+        git commit -m "Update build timestamp"
+        git push
