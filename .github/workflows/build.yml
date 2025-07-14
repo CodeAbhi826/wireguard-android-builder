@@ -1,117 +1,126 @@
-name: WireGuard Android Build Pipeline
+name: Auto Build WireGuard for Android
 on:
+  workflow_dispatch:
   schedule:
-    - cron: '0 12 * * *'  # Daily builds at 12:00 UTC
+    - cron: '0 12 * * *'  # Daily check at 12 PM UTC
   repository_dispatch:
     types: [source_updated]
-  push:
-    branches: [main]
-  workflow_dispatch:
 
 jobs:
-  build-binaries:
+  check-updates:
+    runs-on: ubuntu-latest
+    outputs:
+      build-needed: ${{ steps.check.outputs.build-needed }}
+      tools-sha: ${{ steps.tools-commit.outputs.sha }}
+      go-sha: ${{ steps.go-commit.outputs.sha }}
+    steps:
+    - name: Get wireguard-tools latest commit
+      id: tools-commit
+      run: |
+        COMMIT=$(git ls-remote https://git.zx2c4.com/wireguard-tools HEAD | awk '{print $1}')
+        echo "sha=$COMMIT" >> $GITHUB_OUTPUT
+        
+    - name: Get wireguard-go latest commit
+      id: go-commit
+      run: |
+        COMMIT=$(git ls-remote https://git.zx2c4.com/wireguard-go HEAD | awk '{print $1}')
+        echo "sha=$COMMIT" >> $GITHUB_OUTPUT
+        
+    - name: Check current commits
+      id: check
+      run: |
+        # Fetch last built commits
+        curl -O https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/last_commits.txt 2>/dev/null || true
+        
+        # Compare with latest
+        CURRENT_TOOLS=$(grep tools last_commits.txt | cut -d: -f2 2>/dev/null || true)
+        CURRENT_GO=$(grep go last_commits.txt | cut -d: -f2 2>/dev/null || true)
+        
+        if [ "$CURRENT_TOOLS" != "${{ steps.tools-commit.outputs.sha }}" ] || \
+           [ "$CURRENT_GO" != "${{ steps.go-commit.outputs.sha }}" ]; then
+          echo "build-needed=true" >> $GITHUB_OUTPUT
+          echo "New commits detected - build required"
+        else
+          echo "build-needed=false" >> $GITHUB_OUTPUT
+          echo "No new commits - skipping build"
+        fi
+
+  build:
+    needs: check-updates
+    if: ${{ needs.check-updates.outputs.build-needed == 'true' }}
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
+    - name: Checkout code
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
       
-    - name: Setup build environment
+    - name: Build wireguard-tools
       run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential git gcc-aarch64-linux-gnu golang-go jq
-        
-    # Check if WireGuard sources have updated
-    - name: Check source updates
-      id: check-sources
-      run: |
-        # Get latest commit from WireGuard sources
-        tools_commit=$(curl -s https://api.github.com/repos/WireGuard/wireguard-tools/commits | jq -r '.[0].sha')
-        go_commit=$(curl -s https://api.github.com/repos/WireGuard/wireguard-go/commits | jq -r '.[0].sha')
-        
-        # Check against last known commits
-        if [ -f "last_commits.txt" ]; then
-          last_tools_commit=$(grep tools last_commits.txt | cut -d':' -f2)
-          last_go_commit=$(grep go last_commits.txt | cut -d':' -f2)
-        else
-          last_tools_commit=""
-          last_go_commit=""
-        fi
-        
-        # Set outputs using new format
-        if [ "$tools_commit" != "$last_tools_commit" ] || [ "$go_commit" != "$last_go_commit" ]; then
-          echo "tools:${tools_commit}" > last_commits.txt
-          echo "go:${go_commit}" >> last_commits.txt
-          echo "should_build=true" >> $GITHUB_OUTPUT
-        else
-          echo "should_build=false" >> $GITHUB_OUTPUT
-        fi
-        
-    # Skip build if no updates (except for manual triggers)
-    - name: Skip build if no updates
-      if: ${{ steps.check-sources.outputs.should_build == 'false' && github.event_name != 'workflow_dispatch' }}
-      run: |
-        echo "No source updates - skipping build"
-        exit 1
-        
-    - name: Clone WireGuard sources
-      run: |
-        git clone --depth 1 https://git.zx2c4.com/wireguard-tools
-        git clone --depth 1 https://git.zx2c4.com/wireguard-go
-        
-    - name: Build wireguard-tools (wg, wg-quick)
-      run: |
+        git clone https://git.zx2c4.com/wireguard-tools
         cd wireguard-tools/src
-        make CC="aarch64-linux-gnu-gcc" LDFLAGS="-static" -j$(nproc)
+        git checkout ${{ needs.check-updates.outputs.tools-sha }}
+        make \
+          CC="gcc" \
+          ARCH="arm64" \
+          CROSS_COMPILE="aarch64-linux-gnu-" \
+          WITH_WGQUICK=yes \
+          WITH_WGCONFIG=yes \
+          WITH_SYSTEMDUNITS=no \
+          -j$(nproc)
         
+        # Apply Android patches
+        sed -i 's|#!/bin/bash|#!/system/bin/sh|' wg-quick/linux.bash
+        sed -i '/resolvconf/d; /iptables-restore/d; /ip6tables-restore/d; /nft/d; /systemctl/d' wg-quick/linux.bash
+        echo 'android_set_dns() { [ -z "$DNS" ] || setprop net.dns1 "${DNS%%,*}"; }' >> wg-quick/linux.bash
+        sed -i '/set_mtu_up/a android_set_dns' wg-quick/linux.bash
+
     - name: Build wireguard-go
       run: |
+        git clone https://git.zx2c4.com/wireguard-go
         cd wireguard-go
+        git checkout ${{ needs.check-updates.outputs.go-sha }}
         GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o wireguard-go
-        
+
     - name: Prepare artifacts
       run: |
         mkdir -p artifacts
         cp wireguard-tools/src/wg artifacts/
         cp wireguard-tools/src/wg-quick/linux.bash artifacts/wg-quick
         cp wireguard-go/wireguard-go artifacts/
+        
+        # Create unified launcher
+        cat << 'EOF' > artifacts/wg-android
+        #!/system/bin/sh
+        if [ -e /sys/module/wireguard ]; then
+            ./wg-quick "$@"
+        else
+            echo "[!] Using userspace wireguard-go"
+            WG_QUICK_USERSPACE_IMPLEMENTATION=./wireguard-go ./wg-quick "$@"
+        fi
+        EOF
+        
         chmod +x artifacts/*
-        echo "Built on $(date -u)" > artifacts/build-info.txt
-        
-        # Create zip file to fix EISDIR error
         zip -r wireguard-android-arm64.zip artifacts
-        
-    - name: Upload binaries
-      uses: actions/upload-artifact@v4
-      with:
-        name: wireguard-android-binaries
-        path: wireguard-android-arm64.zip
-        
-    # Create GitHub Release
+
+    - name: Update commit tracker
+      run: |
+        echo "tools:${{ needs.check-updates.outputs.tools-sha }}" > last_commits.txt
+        echo "go:${{ needs.check-updates.outputs.go-sha }}" >> last_commits.txt
+        git config user.name "GitHub Actions"
+        git config user.email "actions@users.noreply.github.com"
+        git add last_commits.txt
+        git commit -m "Update to latest WireGuard commits"
+        git push
+
     - name: Create Release
-      id: create_release
       uses: softprops/action-gh-release@v1
       with:
+        files: wireguard-android-arm64.zip
         tag_name: build-${{ github.run_id }}
         name: "WireGuard Android Build - $(date +'%Y-%m-%d')"
         body: |
-          Automatic build of WireGuard tools for Android ARM64
+          Automatic build of WireGuard tools for Android
           - Built from latest sources
-          - Static binaries (no dependencies)
-          - Userspace implementation
+          - Tools commit: ${{ needs.check-updates.outputs.tools-sha }}
+          - Go commit: ${{ needs.check-updates.outputs.go-sha }}
         draft: false
         prerelease: false
-        files: |
-          wireguard-android-arm64.zip
-        
-    - name: Update build timestamp
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" > last_build.txt
-        git config user.name "GitHub Actions"
-        git config user.email "actions@users.noreply.github.com"
-        git add last_build.txt
-        git commit -m "Update build timestamp"
-        git push
